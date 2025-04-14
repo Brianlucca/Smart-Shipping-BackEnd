@@ -16,14 +16,15 @@ const EXPIRATION_TIME = 10 * 60 * 1000;
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
-  "https://smart-shipping.vercel.app/",
+  "https://smart-shipping.vercel.app",
 ];
 
 app.use(
   cors({
     origin: allowedOrigins,
     credentials: true,
-    methods: ["GET", "POST"],
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"]
   })
 );
 
