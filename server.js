@@ -8,7 +8,7 @@ const cloudinary = require("cloudinary").v2;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const EXPIRATION_TIME = 10 * 60 * 1000;
+const EXPIRATION_TIME = 5 * 60 * 1000;
 
 const sessionData = {};
 
@@ -23,12 +23,15 @@ const allowedOrigins = [
   "http://localhost:3000",
   "https://smart-shipping.vercel.app",
 ];
-app.use(cors({
-  origin: allowedOrigins,
-  credentials: true,
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type"],
-}));
+
+app.use(
+  cors({
+    origin: allowedOrigins,
+    credentials: true,
+    methods: ["GET", "POST", "OPTIONS"],
+    allowedHeaders: ["Content-Type"],
+  })
+);
 
 app.use(cookieParser());
 app.use(express.json());
@@ -41,7 +44,7 @@ app.use((req, res, next) => {
 
   req.sessionId = isSessionRoute
     ? sessionIdFromUrl
-    : (req.cookies.sessionId || generateSessionId());
+    : req.cookies.sessionId || generateSessionId();
 
   res.cookie("sessionId", req.sessionId, {
     maxAge: 3600000,
@@ -49,6 +52,15 @@ app.use((req, res, next) => {
     sameSite: "none",
     secure: process.env.NODE_ENV === "production" && req.protocol === "https",
   });
+
+  if (!req.cookies.sessionStart && isSessionRoute) {
+    const now = Date.now();
+    res.cookie("sessionStart", now.toString(), {
+      maxAge: 3600000,
+      sameSite: "none",
+      secure: process.env.NODE_ENV === "production" && req.protocol === "https",
+    });
+  }
 
   next();
 });
@@ -71,13 +83,15 @@ app.post("/upload/:sessionId", upload.single("file"), async (req, res) => {
 
   try {
     const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader.upload_stream(
-        {
-          folder: sessionId,
-          resource_type: "auto",
-        },
-        (err, result) => (err ? reject(err) : resolve(result))
-      ).end(file.buffer);
+      cloudinary.uploader
+        .upload_stream(
+          {
+            folder: sessionId,
+            resource_type: "auto",
+          },
+          (err, result) => (err ? reject(err) : resolve(result))
+        )
+        .end(file.buffer);
     });
 
     if (!sessionData[sessionId]) sessionData[sessionId] = [];
@@ -103,29 +117,39 @@ app.get("/:sessionId", (req, res) => {
   const files = sessionData[sessionId];
 
   if (!files || files.length === 0) {
-    return res.status(404).send("Sessão não encontrada ou sem arquivos. Caso o arquivo foi enviado, Atualize a pagina!");
+    return res
+      .status(404)
+      .send(
+        "Sessão não encontrada ou sem arquivos. Caso o arquivo foi enviado, Atualize a pagina!"
+      );
   }
 
-  const fileItems = files.map(file => {
-    let preview = "";
-    if (file.resource_type === "image") {
-      preview = `<img src="${file.url}" alt="${file.name}" class="preview-img" />`;
-    } else if (file.resource_type === "video") {
-      preview = `<video controls class="preview-video"><source src="${file.url}" type="video/${file.format}"></video>`;
-    } else if (file.resource_type === "raw" && file.format === "pdf") {
-      preview = `<embed src="${file.url}" type="application/pdf" class="preview-pdf" />`;
-    } else {
-      preview = `<div class="preview-icon">📄</div>`;
-    }
+  const now = Date.now();
+  const sessionStart = parseInt(req.cookies.sessionStart || now);
+  const remaining = Math.max(0, EXPIRATION_TIME - (now - sessionStart));
 
-    return `
+  const fileItems = files
+    .map((file) => {
+      let preview = "";
+      if (file.resource_type === "image") {
+        preview = `<img src="${file.url}" alt="${file.name}" class="preview-img" />`;
+      } else if (file.resource_type === "video") {
+        preview = `<video controls class="preview-video"><source src="${file.url}" type="video/${file.format}"></video>`;
+      } else if (file.resource_type === "raw" && file.format === "pdf") {
+        preview = `<embed src="${file.url}" type="application/pdf" class="preview-pdf" />`;
+      } else {
+        preview = `<div class="preview-icon">📄</div>`;
+      }
+
+      return `
       <div class="file-card">
         ${preview}
         <p class="file-name">${file.name}</p>
         <a class="download-btn" href="${file.url}" download>⬇ Baixar</a>
       </div>
     `;
-  }).join("");
+    })
+    .join("");
 
   const html = `
     <!DOCTYPE html>
@@ -147,14 +171,12 @@ app.get("/:sessionId", (req, res) => {
         --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.02);
         --shadow-hover: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
     }
-
     * {
         box-sizing: border-box;
         margin: 0;
         padding: 0;
         font-family: 'Inter', system-ui, -apple-system, sans-serif;
     }
-
     body {
         background: var(--bg);
         color: var(--text);
@@ -165,7 +187,6 @@ app.get("/:sessionId", (req, res) => {
         flex-direction: column;
         align-items: center;
     }
-
     h2 {
         font-size: 2rem;
         font-weight: 700;
@@ -175,7 +196,6 @@ app.get("/:sessionId", (req, res) => {
         position: relative;
         padding-bottom: 0.5rem;
     }
-
     h2::after {
         content: '';
         position: absolute;
@@ -187,7 +207,6 @@ app.get("/:sessionId", (req, res) => {
         background: var(--primary);
         border-radius: 2px;
     }
-
     #timer {
         font-weight: 600;
         color: #ef4444;
@@ -199,7 +218,6 @@ app.get("/:sessionId", (req, res) => {
         gap: 0.5rem;
         align-items: center;
     }
-
     .file-container {
         width: 100%;
         max-width: 1280px;
@@ -208,7 +226,6 @@ app.get("/:sessionId", (req, res) => {
         gap: 2rem;
         padding: 1rem;
     }
-
     .file-card {
         background: var(--card-bg);
         border: 1px solid var(--border);
@@ -218,17 +235,15 @@ app.get("/:sessionId", (req, res) => {
         display: flex;
         flex-direction: column;
         align-items: center;
-        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        transition: all 0.25s;
         overflow: hidden;
         position: relative;
     }
-
     .file-card:hover {
         transform: translateY(-5px);
         box-shadow: var(--shadow-hover);
         border-color: var(--primary);
     }
-
     .preview-img,
     .preview-video,
     .preview-pdf {
@@ -240,7 +255,6 @@ app.get("/:sessionId", (req, res) => {
         background: #f8fafc;
         border: 1px solid var(--border);
     }
-
     .preview-icon {
         width: 100%;
         height: 200px;
@@ -253,26 +267,16 @@ app.get("/:sessionId", (req, res) => {
         margin-bottom: 1.5rem;
         border: 1px solid var(--border);
     }
-
-    .preview-icon svg {
-        width: 64px;
-        height: 64px;
-    }
-
     .file-name {
         font-weight: 500;
         text-align: center;
         margin-bottom: 1rem;
         font-size: 1rem;
         color: var(--text);
-        display: -webkit-box;
-        -webkit-line-clamp: 2;
-        -webkit-box-orient: vertical;
         overflow: hidden;
         text-overflow: ellipsis;
         width: 100%;
     }
-
     .download-btn {
         background: linear-gradient(135deg, var(--primary) 0%, #1E4ECF 100%);
         color: white;
@@ -285,59 +289,19 @@ app.get("/:sessionId", (req, res) => {
         text-align: center;
         border: 2px solid transparent;
     }
-
     .download-btn:hover {
         background: linear-gradient(135deg, var(--primary-hover) 0%, #183D9F 100%);
         transform: translateY(-1px);
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
-    }
-
-    @media (max-width: 768px) {
-        .file-container {
-            grid-template-columns: 1fr;
-            padding: 0;
-        }
-
-        h2 {
-            font-size: 1.75rem;
-        }
-
-        #timer {
-            font-size: 0.9rem;
-        }
-    }
-
-    @media (max-width: 480px) {
-        body {
-            padding: 1.5rem 0.5rem;
-        }
-
-        h2 {
-            font-size: 1.5rem;
-        }
-
-        .file-card {
-            padding: 1rem;
-        }
-
-        .preview-img,
-        .preview-video,
-        .preview-pdf,
-        .preview-icon {
-            height: 160px;
-        }
     }
 </style>
 </head>
 <body>
   <h2>Arquivos da Sessão: ${sessionId}</h2>
   <p id="timer"></p>
-  <div class="file-container">
-    ${fileItems}
-  </div>
-
+  <div class="file-container">${fileItems}</div>
   <script>
-    let timer = ${EXPIRATION_TIME / 1000};
+    let timer = ${Math.floor(remaining / 1000)};
     const timerElement = document.getElementById("timer");
     const interval = setInterval(() => {
       let minutes = Math.floor(timer / 60);
@@ -353,30 +317,34 @@ app.get("/:sessionId", (req, res) => {
   </script>
 </body>
 </html>
-
   `;
 
   res.send(html);
 });
 
-setInterval(() => {
+setInterval(async () => {
   const now = Date.now();
-
-  Object.entries(sessionData).forEach(([sessionId, files]) => {
-    const validFiles = files.filter(file => {
-      const expired = now - file.createdAt > EXPIRATION_TIME;
-      if (expired) {
-        cloudinary.uploader.destroy(file.public_id).catch(console.error);
+  for (const [sessionId, files] of Object.entries(sessionData)) {
+    const expiredFiles = files.filter(
+      (file) => now - file.createdAt > EXPIRATION_TIME
+    );
+    const validFiles = files.filter(
+      (file) => now - file.createdAt <= EXPIRATION_TIME
+    );
+    const publicIds = expiredFiles.map((f) => f.public_id);
+    if (publicIds.length) {
+      try {
+        await cloudinary.api.delete_resources(publicIds);
+      } catch (e) {
+        console.error("Erro ao deletar arquivos:", e);
       }
-      return !expired;
-    });
-
+    }
     if (validFiles.length === 0) {
       delete sessionData[sessionId];
     } else {
       sessionData[sessionId] = validFiles;
     }
-  });
+  }
 }, 60 * 1000);
 
 app.listen(PORT, () => {
