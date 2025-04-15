@@ -1,21 +1,16 @@
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
-const fs = require("fs");
-const path = require("path");
 const multer = require("multer");
 const cookieParser = require("cookie-parser");
 const crypto = require("crypto");
-const os = require("os");
 const cloudinary = require("cloudinary").v2;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-const FILES_DIR = path.join(os.tmpdir(), "files");
 const EXPIRATION_TIME = 10 * 60 * 1000;
 
-!fs.existsSync(FILES_DIR) && fs.mkdirSync(FILES_DIR);
+const sessionData = {};
 
 cloudinary.config({
   cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -23,222 +18,367 @@ cloudinary.config({
   api_secret: process.env.CLOUDINARY_API_SECRET,
 });
 
-
 const allowedOrigins = [
   "http://localhost:5173",
   "http://localhost:3000",
   "https://smart-shipping.vercel.app",
 ];
-
-app.use(
-  cors({
-    origin: allowedOrigins,
-    credentials: true,
-    methods: ["GET", "POST", "OPTIONS"],
-    allowedHeaders: ["Content-Type"],
-  })
-);
+app.use(cors({
+  origin: allowedOrigins,
+  credentials: true,
+  methods: ["GET", "POST", "OPTIONS"],
+  allowedHeaders: ["Content-Type"],
+}));
 
 app.use(cookieParser());
 app.use(express.json());
-app.use("/public", express.static(path.join(__dirname, "public")));
 
 const generateSessionId = () => crypto.randomBytes(8).toString("hex");
 
 app.use((req, res, next) => {
-  try {
-    const sessionIdFromUrl = req.path.split("/")[1];
-    const isSessionRoute = /^[a-f0-9]{16}$/.test(sessionIdFromUrl);
+  const sessionIdFromUrl = req.path.split("/")[1];
+  const isSessionRoute = /^[a-f0-9]{16}$/.test(sessionIdFromUrl);
 
-    req.sessionId =
-      isSessionRoute
-        ? sessionIdFromUrl
-        : (req.cookies.sessionId || generateSessionId());
+  req.sessionId = isSessionRoute
+    ? sessionIdFromUrl
+    : (req.cookies.sessionId || generateSessionId());
 
-    res.cookie("sessionId", req.sessionId, {
-      maxAge: 3600000,
-      httpOnly: true,
-      sameSite: "none",
-      secure: process.env.NODE_ENV === "production" && req.protocol === "https",
-    });
+  res.cookie("sessionId", req.sessionId, {
+    maxAge: 3600000,
+    httpOnly: true,
+    sameSite: "none",
+    secure: process.env.NODE_ENV === "production" && req.protocol === "https",
+  });
 
-    const userDir = path.join(FILES_DIR, req.sessionId);
-    !fs.existsSync(userDir) && fs.mkdirSync(userDir);
-
-    next();
-  } catch (error) {
-    console.error("Middleware Error:", error);
-    res.status(500).send("Server Error");
-  }
+  next();
 });
-
 
 app.get("/session-url", (req, res) => {
-  try {
-    const url = `${req.protocol}://${req.get("host")}/${req.sessionId}`;
-    res.status(200).json({ url });
-  } catch (error) {
-    console.error("Session URL Error:", error);
-    res.status(500).json({ error: "Failed to generate URL" });
-  }
+  const url = `${req.protocol}://${req.get("host")}/${req.sessionId}`;
+  res.status(200).json({ url });
 });
-
-const generateHTML = (userDir, sessionId) => {
-  try {
-    const filesList = path.join(userDir, "files.json");
-    if (!fs.existsSync(filesList)) return;
-
-    const files = JSON.parse(fs.readFileSync(filesList));
-    const expirationTime = Date.now() + EXPIRATION_TIME;
-
-    const fileItems = files.map(file => {
-      let preview = "";
-      if (file.resource_type === "image") {
-        preview = `<img src="${file.url}" alt="${file.name}" />`;
-      } else if (file.resource_type === "pdf") {
-        preview = `<embed src="${file.url}" type="application/pdf" width="100%" height="200px" />`;
-      } else if (file.resource_type === "video") {
-        preview = `<video controls><source src="${file.url}" type="${file.format}"></video>`;
-      } else {
-        preview = `<div class="icon">📄</div>`;
-      }
-
-      return `
-        <div class="file-card">
-          <div class="preview">${preview}</div>
-          <div class="info">
-            <span class="name" title="${file.name}">${file.name}</span>
-            <a href="${file.url}" download class="download-btn">⬇ Baixar</a>
-          </div>
-        </div>
-      `;
-    }).join("");
-
-    const template = fs.readFileSync(path.join(__dirname, "template.html"), "utf-8")
-      .replace("{{fileItems}}", fileItems)
-      .replace("{{timerScript}}", `
-        let timer = ${EXPIRATION_TIME / 1000};
-        const timerElement = document.getElementById('timer');
-        const interval = setInterval(() => {
-          let minutes = Math.floor(timer / 60);
-          let seconds = timer % 60;
-          timerElement.innerText = \`\${minutes}m\${seconds < 10 ? '0' : ''}\${seconds}s\`;
-          if (timer <= 0) {
-            clearInterval(interval);
-            alert('O tempo da sessão expirou!');
-          }
-          timer--;
-        }, 1000);
-      `);
-
-    fs.writeFileSync(path.join(userDir, "index.html"), template);
-  } catch (error) {
-    console.error("HTML Generation Error:", error);
-  }
-};
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 },
+  limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-app.post("/upload", upload.single("file"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).json({ error: "Nenhum arquivo enviado" });
+app.post("/upload/:sessionId", upload.single("file"), async (req, res) => {
+  const { sessionId } = req.params;
+  const file = req.file;
 
+  if (!file) return res.status(400).json({ error: "Nenhum arquivo enviado" });
+
+  try {
     const result = await new Promise((resolve, reject) => {
-      const stream = cloudinary.uploader.upload_stream(
+      cloudinary.uploader.upload_stream(
         {
-          folder: req.sessionId,
+          folder: sessionId,
           resource_type: "auto",
         },
-        (error, result) => {
-          if (error) reject(error);
-          else resolve(result);
-        }
-      );
-      stream.end(req.file.buffer);
+        (err, result) => (err ? reject(err) : resolve(result))
+      ).end(file.buffer);
     });
 
-    const userDir = path.join(FILES_DIR, req.sessionId);
-    const filesList = path.join(userDir, "files.json");
-    let files = [];
-    
-    if (fs.existsSync(filesList)) {
-      files = JSON.parse(fs.readFileSync(filesList));
-    }
-    
-    files.push({
+    if (!sessionData[sessionId]) sessionData[sessionId] = [];
+
+    sessionData[sessionId].push({
       url: result.secure_url,
-      name: req.file.originalname,
+      name: file.originalname,
       public_id: result.public_id,
       resource_type: result.resource_type,
-      format: result.format
+      format: result.format,
+      createdAt: Date.now(),
     });
-    
-    fs.writeFileSync(filesList, JSON.stringify(files));
 
-    generateHTML(userDir, req.sessionId);
-    res.json({ status: "success", file: req.file.originalname });
-  } catch (error) {
-    console.error("Upload Error:", error);
-    res.status(500).json({ error: "Upload failed" });
-  }
-});
-
-app.get("/", (req, res) => {
-  try {
-    const indexPath = path.join(FILES_DIR, req.sessionId, "index.html");
-    fs.existsSync(indexPath)
-      ? res.sendFile(indexPath)
-      : res.send('<div style="text-align:center; padding:2rem;">Nenhum arquivo enviado.</div>');
-  } catch (error) {
-    console.error("Root Route Error:", error);
-    res.status(500).send("Server Error");
+    res.json({ status: "success", file: file.originalname });
+  } catch (err) {
+    console.error("Upload error:", err);
+    res.status(500).json({ error: "Falha ao enviar o arquivo." });
   }
 });
 
 app.get("/:sessionId", (req, res) => {
-  const sessionId = req.params.sessionId;
-  const userDir = path.join(FILES_DIR, sessionId);
-  const indexPath = path.join(userDir, "index.html");
+  const { sessionId } = req.params;
+  const files = sessionData[sessionId];
 
-  if (fs.existsSync(indexPath)) {
-    res.sendFile(indexPath);
-  } else {
-    res.status(404).send("Sessão não encontrada ou expirada.");
+  if (!files || files.length === 0) {
+    return res.status(404).send("Sessão não encontrada ou sem arquivos. Caso o arquivo foi enviado, Atualize a pagina!");
   }
+
+  const fileItems = files.map(file => {
+    let preview = "";
+    if (file.resource_type === "image") {
+      preview = `<img src="${file.url}" alt="${file.name}" class="preview-img" />`;
+    } else if (file.resource_type === "video") {
+      preview = `<video controls class="preview-video"><source src="${file.url}" type="video/${file.format}"></video>`;
+    } else if (file.resource_type === "raw" && file.format === "pdf") {
+      preview = `<embed src="${file.url}" type="application/pdf" class="preview-pdf" />`;
+    } else {
+      preview = `<div class="preview-icon">📄</div>`;
+    }
+
+    return `
+      <div class="file-card">
+        ${preview}
+        <p class="file-name">${file.name}</p>
+        <a class="download-btn" href="${file.url}" download>⬇ Baixar</a>
+      </div>
+    `;
+  }).join("");
+
+  const html = `
+    <!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Arquivos da Sessão</title>
+<style>
+    :root {
+        --bg: #f8f9ff;
+        --card-bg: #ffffff;
+        --primary: #2A5EE8;
+        --primary-hover: #1E4ECF;
+        --text: #2d3748;
+        --text-light: #718096;
+        --border: #e2e8f0;
+        --radius: 16px;
+        --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -1px rgba(0, 0, 0, 0.02);
+        --shadow-hover: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.02);
+    }
+
+    * {
+        box-sizing: border-box;
+        margin: 0;
+        padding: 0;
+        font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    }
+
+    body {
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        min-height: 100vh;
+        padding: 2rem 1rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+    }
+
+    h2 {
+        font-size: 2rem;
+        font-weight: 700;
+        margin-bottom: 0.75rem;
+        text-align: center;
+        color: var(--text);
+        position: relative;
+        padding-bottom: 0.5rem;
+    }
+
+    h2::after {
+        content: '';
+        position: absolute;
+        bottom: 0;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 60px;
+        height: 3px;
+        background: var(--primary);
+        border-radius: 2px;
+    }
+
+    #timer {
+        font-weight: 600;
+        color: #ef4444;
+        margin-bottom: 2rem;
+        padding: 0.5rem 1.25rem;
+        background: rgba(239, 68, 68, 0.1);
+        border-radius: 8px;
+        display: inline-flex;
+        gap: 0.5rem;
+        align-items: center;
+    }
+
+    .file-container {
+        width: 100%;
+        max-width: 1280px;
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+        gap: 2rem;
+        padding: 1rem;
+    }
+
+    .file-card {
+        background: var(--card-bg);
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        box-shadow: var(--shadow);
+        padding: 1.5rem;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+        overflow: hidden;
+        position: relative;
+    }
+
+    .file-card:hover {
+        transform: translateY(-5px);
+        box-shadow: var(--shadow-hover);
+        border-color: var(--primary);
+    }
+
+    .preview-img,
+    .preview-video,
+    .preview-pdf {
+        width: 100%;
+        height: 400px;
+        border-radius: 8px;
+        object-fit: cover;
+        margin-bottom: 1.5rem;
+        background: #f8fafc;
+        border: 1px solid var(--border);
+    }
+
+    .preview-icon {
+        width: 100%;
+        height: 200px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--primary);
+        background: #f8fafc;
+        border-radius: 8px;
+        margin-bottom: 1.5rem;
+        border: 1px solid var(--border);
+    }
+
+    .preview-icon svg {
+        width: 64px;
+        height: 64px;
+    }
+
+    .file-name {
+        font-weight: 500;
+        text-align: center;
+        margin-bottom: 1rem;
+        font-size: 1rem;
+        color: var(--text);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        width: 100%;
+    }
+
+    .download-btn {
+        background: linear-gradient(135deg, var(--primary) 0%, #1E4ECF 100%);
+        color: white;
+        text-decoration: none;
+        padding: 0.75rem 1.5rem;
+        border-radius: 8px;
+        font-weight: 600;
+        transition: all 0.2s ease;
+        width: 100%;
+        text-align: center;
+        border: 2px solid transparent;
+    }
+
+    .download-btn:hover {
+        background: linear-gradient(135deg, var(--primary-hover) 0%, #183D9F 100%);
+        transform: translateY(-1px);
+        box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+    }
+
+    @media (max-width: 768px) {
+        .file-container {
+            grid-template-columns: 1fr;
+            padding: 0;
+        }
+
+        h2 {
+            font-size: 1.75rem;
+        }
+
+        #timer {
+            font-size: 0.9rem;
+        }
+    }
+
+    @media (max-width: 480px) {
+        body {
+            padding: 1.5rem 0.5rem;
+        }
+
+        h2 {
+            font-size: 1.5rem;
+        }
+
+        .file-card {
+            padding: 1rem;
+        }
+
+        .preview-img,
+        .preview-video,
+        .preview-pdf,
+        .preview-icon {
+            height: 160px;
+        }
+    }
+</style>
+</head>
+<body>
+  <h2>Arquivos da Sessão: ${sessionId}</h2>
+  <p id="timer"></p>
+  <div class="file-container">
+    ${fileItems}
+  </div>
+
+  <script>
+    let timer = ${EXPIRATION_TIME / 1000};
+    const timerElement = document.getElementById("timer");
+    const interval = setInterval(() => {
+      let minutes = Math.floor(timer / 60);
+      let seconds = timer % 60;
+      timerElement.innerText = \`Tempo restante: \${minutes}m\${seconds < 10 ? '0' : ''}\${seconds}s\`;
+      if (timer <= 0) {
+        clearInterval(interval);
+        alert("O tempo da sessão expirou!");
+        location.reload();
+      }
+      timer--;
+    }, 1000);
+  </script>
+</body>
+</html>
+
+  `;
+
+  res.send(html);
 });
 
-setInterval(async () => {
-  try {
-    fs.readdirSync(FILES_DIR).forEach(async (folder) => {
-      const dirPath = path.join(FILES_DIR, folder);
-      const filesList = path.join(dirPath, "files.json");
-      
-      if (fs.existsSync(filesList)) {
-        const stats = fs.statSync(filesList);
-        if (Date.now() - stats.mtimeMs > EXPIRATION_TIME) {
-          const files = JSON.parse(fs.readFileSync(filesList));
-          for (const file of files) {
-            await cloudinary.uploader.destroy(file.public_id);
-          }
-          fs.rmSync(dirPath, { recursive: true, force: true });
-        }
-      } else {
-        // Caso não haja arquivos, deleta após 10min da criação da pasta
-        const stats = fs.statSync(dirPath);
-        if (Date.now() - stats.ctimeMs > EXPIRATION_TIME) {
-          fs.rmSync(dirPath, { recursive: true, force: true });
-        }
+setInterval(() => {
+  const now = Date.now();
+
+  Object.entries(sessionData).forEach(([sessionId, files]) => {
+    const validFiles = files.filter(file => {
+      const expired = now - file.createdAt > EXPIRATION_TIME;
+      if (expired) {
+        cloudinary.uploader.destroy(file.public_id).catch(console.error);
       }
+      return !expired;
     });
-  } catch (error) {
-    console.error("Cleanup Error:", error);
-  }
-}, 60000);
+
+    if (validFiles.length === 0) {
+      delete sessionData[sessionId];
+    } else {
+      sessionData[sessionId] = validFiles;
+    }
+  });
+}, 60 * 1000);
 
 app.listen(PORT, () => {
-  console.log(`✅ Servidor operacional na porta ${PORT}`);
-  console.log(`🔗 Acesse: http://localhost:${PORT}`);
+  console.log(`✅ Servidor rodando em http://localhost:${PORT}`);
 });
