@@ -7,6 +7,7 @@ const crypto = require("crypto");
 const cloudinary = require("cloudinary").v2;
 
 const app = express();
+app.set("trust proxy", 1);
 const PORT = process.env.PORT || 3000;
 const EXPIRATION_TIME = 5 * 60 * 1000;
 
@@ -96,6 +97,7 @@ app.post("/upload/:sessionId", upload.array("files"), async (req, res) => {
             resolve({
               url: cloudinary.url(result.public_id, {
                 flags: 'attachment',
+                secure: true,
                 resource_type: result.resource_type
               }),
               downloadUrl: cloudinary.url(result.public_id, {
