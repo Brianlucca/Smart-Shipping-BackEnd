@@ -231,7 +231,7 @@ app.get("/:sessionId", (req, res) => {
         align-items: center;
     }
     h2 {
-        font-size: 1rem;
+        font-size: 1.5rem;
         font-weight: 700;
         margin-bottom: 0.75rem;
         text-align: center;
