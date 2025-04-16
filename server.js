@@ -102,6 +102,7 @@ app.post("/upload/:sessionId", upload.array("files"), async (req, res) => {
               }),
               downloadUrl: cloudinary.url(result.public_id, {
                 flags: 'attachment',
+                secure: true,
                 resource_type: result.resource_type
               }),
               name: file.originalname,
