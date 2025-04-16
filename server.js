@@ -36,7 +36,7 @@ app.use(
 app.use(cookieParser());
 app.use(express.json());
 
-const generateSessionId = () => crypto.randomBytes(8).toString("hex");
+const generateSessionId = () => crypto.randomBytes(12).toString("hex");
 
 app.use((req, res, next) => {
   const sessionIdFromUrl = req.path.split("/")[1];
@@ -75,58 +75,86 @@ const upload = multer({
   limits: { fileSize: 20 * 1024 * 1024 },
 });
 
-app.post("/upload/:sessionId", upload.single("file"), async (req, res) => {
+app.post("/upload/:sessionId", upload.array("files"), async (req, res) => {
   const { sessionId } = req.params;
-  const file = req.file;
+  const files = req.files;
 
-  if (!file) return res.status(400).json({ error: "Nenhum arquivo enviado" });
+  if (!files || files.length === 0) {
+    return res.status(400).json({ error: "Nenhum arquivo enviado" });
+  }
 
   try {
-    const result = await new Promise((resolve, reject) => {
-      cloudinary.uploader
-        .upload_stream(
+    const uploadPromises = files.map(file => {
+      return new Promise((resolve, reject) => {
+        cloudinary.uploader.upload_stream(
           {
             folder: sessionId,
             resource_type: "auto",
           },
-          (err, result) => (err ? reject(err) : resolve(result))
-        )
-        .end(file.buffer);
+          (err, result) => {
+            if (err) return reject(err);
+            resolve({
+              url: cloudinary.url(result.public_id, {
+                flags: 'attachment',
+                resource_type: result.resource_type
+              }),
+              downloadUrl: cloudinary.url(result.public_id, {
+                flags: 'attachment',
+                resource_type: result.resource_type
+              }),
+              name: file.originalname,
+              public_id: result.public_id,
+              resource_type: result.resource_type,
+              format: result.format,
+              bytes: result.bytes,
+              createdAt: Date.now()
+            });
+          }
+        ).end(file.buffer);
+      });
     });
 
+    const results = await Promise.all(uploadPromises);
+    
     if (!sessionData[sessionId]) sessionData[sessionId] = [];
+    sessionData[sessionId].push(...results);
 
-    sessionData[sessionId].push({
-      url: result.secure_url,
-      name: file.originalname,
-      public_id: result.public_id,
-      resource_type: result.resource_type,
-      format: result.format,
-      createdAt: Date.now(),
-    });
-
-    res.json({ status: "success", file: file.originalname });
+    res.json({ status: "success", count: files.length });
   } catch (err) {
     console.error("Upload error:", err);
-    res.status(500).json({ error: "Falha ao enviar o arquivo." });
+    res.status(500).json({ error: "Falha ao enviar arquivos." });
   }
 });
+
+const formatFileSize = (bytes) => {
+  if (!bytes) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2) + ' ' + sizes[i]);
+};
 
 app.get("/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const files = sessionData[sessionId];
 
   if (!files || files.length === 0) {
-    return res
-      .status(404)
-      .send(
-        "Sessão não encontrada ou sem arquivos. Caso o arquivo foi enviado, Atualize a pagina!"
-      );
+    return res.status(404).send(`
+      <div style="font-family: Arial, sans-serif; text-align: center; margin-top: 50px;">
+        <h1 style="font-size: 24px; color: #d32f2f;">Sessão não encontrada</h1>
+        <p style="font-size: 16px; color: #555;">
+          O link da sessão pode ter expirado ou ainda não recebeu arquivos.
+        </p>
+        <p style="font-size: 16px; color: #555; margin-top: 10px;">
+          Caso os arquivos já tenham sido enviados, tente atualizar a página ou verificar se o código da sessão está correto.
+        </p>
+      </div>
+    `);
+    
   }
 
   const now = Date.now();
   const sessionStart = parseInt(req.cookies.sessionStart || now);
-  const remaining = Math.max(0, EXPIRATION_TIME - (now - sessionStart));
 
   const fileItems = files
     .map((file) => {
@@ -136,16 +164,28 @@ app.get("/:sessionId", (req, res) => {
       } else if (file.resource_type === "video") {
         preview = `<video controls class="preview-video"><source src="${file.url}" type="video/${file.format}"></video>`;
       } else if (file.resource_type === "raw" && file.format === "pdf") {
-        preview = `<embed src="${file.url}" type="application/pdf" class="preview-pdf" />`;
+        preview = `<div class="preview-icon">
+          <embed src="${file.url}#toolbar=0&navpanes=0" type="application/pdf" class="preview-pdf" />
+        </div>`;
       } else {
         preview = `<div class="preview-icon">📄</div>`;
       }
 
+      const remaining = Math.max(0, EXPIRATION_TIME - (now - file.createdAt));
+      const minutes = Math.floor(remaining / 60000);
+      const seconds = Math.floor((remaining % 60000) / 1000);
+
       return `
       <div class="file-card">
         ${preview}
-        <p class="file-name">${file.name}</p>
-        <a class="download-btn" href="${file.url}" download>⬇ Baixar</a>
+        <div class="file-info">
+          <p class="file-name">${file.name}</p>
+          <p class="file-size">${formatFileSize(file.bytes)} bytes</p>
+          <div class="timer" data-created="${file.createdAt}">
+            Expira em: ${minutes}m${seconds.toString().padStart(2, '0')}s
+          </div>
+        </div>
+        <a class="download-btn" href="${file.downloadUrl}" download="${file.name}">⬇ Baixar</a>
       </div>
     `;
     })
@@ -207,17 +247,6 @@ app.get("/:sessionId", (req, res) => {
         background: var(--primary);
         border-radius: 2px;
     }
-    #timer {
-        font-weight: 600;
-        color: #ef4444;
-        margin-bottom: 2rem;
-        padding: 0.5rem 1.25rem;
-        background: rgba(239, 68, 68, 0.1);
-        border-radius: 8px;
-        display: inline-flex;
-        gap: 0.5rem;
-        align-items: center;
-    }
     .file-container {
         width: 100%;
         max-width: 1280px;
@@ -267,15 +296,32 @@ app.get("/:sessionId", (req, res) => {
         margin-bottom: 1.5rem;
         border: 1px solid var(--border);
     }
+    .file-info {
+        width: 100%;
+        margin-bottom: 1rem;
+    }
     .file-name {
         font-weight: 500;
         text-align: center;
-        margin-bottom: 1rem;
+        margin-bottom: 0.5rem;
         font-size: 1rem;
         color: var(--text);
         overflow: hidden;
         text-overflow: ellipsis;
-        width: 100%;
+        white-space: nowrap;
+    }
+    .file-size {
+        font-size: 0.875rem;
+        color: var(--text-light);
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .timer {
+        font-size: 1rem;
+        color: #ef4444;
+        font-weight: 500;
+        text-align: center;
+        margin-bottom: 1rem;
     }
     .download-btn {
         background: linear-gradient(135deg, var(--primary) 0%, #1E4ECF 100%);
@@ -298,22 +344,29 @@ app.get("/:sessionId", (req, res) => {
 </head>
 <body>
   <h2>Arquivos da Sessão: ${sessionId}</h2>
-  <p id="timer"></p>
   <div class="file-container">${fileItems}</div>
   <script>
-    let timer = ${Math.floor(remaining / 1000)};
-    const timerElement = document.getElementById("timer");
-    const interval = setInterval(() => {
-      let minutes = Math.floor(timer / 60);
-      let seconds = timer % 60;
-      timerElement.innerText = \`Tempo restante: \${minutes}m\${seconds < 10 ? '0' : ''}\${seconds}s\`;
-      if (timer <= 0) {
-        clearInterval(interval);
-        alert("O tempo da sessão expirou!");
-        location.reload();
-      }
-      timer--;
-    }, 1000);
+    document.querySelectorAll('.timer').forEach(timerElement => {
+      const createdAt = parseInt(timerElement.dataset.created);
+      
+      const updateTimer = () => {
+        const now = Date.now();
+        const remaining = Math.max(0, ${EXPIRATION_TIME} - (now - createdAt));
+        
+        if (remaining <= 0) {
+          timerElement.innerHTML = 'Expirado';
+          timerElement.closest('.file-card').style.opacity = '0.5';
+          return;
+        }
+        
+        const minutes = Math.floor(remaining / 60000);
+        const seconds = Math.floor((remaining % 60000) / 1000);
+        timerElement.innerHTML = \`Expira em: \${minutes}m\${seconds.toString().padStart(2, '0')}s\`;
+      };
+      
+      updateTimer();
+      setInterval(updateTimer, 1000);
+    });
   </script>
 </body>
 </html>
@@ -348,5 +401,5 @@ setInterval(async () => {
 }, 60 * 1000);
 
 app.listen(PORT, () => {
-  console.log(`✅ Servidor rodando em http://localhost:${PORT}`);
+  console.log(`Servidor rodando em http://localhost:${PORT}`);
 });
